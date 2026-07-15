@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Audio Oscilloscope</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 2rem;
+            color: #333;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            width: 100%;
+            max-width: 1024px;
+        }
+
+        .controls-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .knobs-container {
+            display: flex;
+            gap: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #eee;
+        }
+
+        .knob-group {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            gap: 0.5rem;
+        }
+
+        .knob-group label {
+            display: flex;
+            justify-content: space-between;
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+        }
+
+        input[type="file"] {
+            font-size: 1rem;
+        }
+
+        canvas {
+            width: 100%;
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            aspect-ratio: 2 / 1;
+        }
+
+        audio {
+            width: 100%;
+            outline: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="controls-card">
+            <input type="file" id="audioInput" accept="audio/*" />
+            <audio id="audioPlayer" controls crossorigin="anonymous"></audio>
+
+            <div class="knobs-container">
+                <div class="knob-group">
+                    <label>
+                        <span>Gain</span>
+                        <span id="gainValue">0.3</span>
+                    </label>
+                    <input type="range" id="gainKnob" min="0" max="1" step="0.01" value="0.3" />
+                </div>
+
+                <div class="knob-group">
+                    <label>
+                        <span>Window</span>
+                        <span id="windowValue">70 ms</span>
+                    </label>
+                    <input type="range" id="windowKnob" min="5" max="600" step="1" value="70" />
+                </div>
+            </div>
+        </div>
+
+        <canvas id="oscilloscope" width="1024" height="512"></canvas>
+    </div>
+
+    <script>
+        const workerCode = `
+            let canvasCtx = null;
+            let CANVAS_WIDTH = 1024;
+            let CANVAS_HEIGHT = 512;
+
+            const linear = (x, in_min, in_max, out_min, out_max) => {
+                return ((x - in_min) / (in_max - in_min)) * (out_max - out_min) + out_min;
+            };
+
+            const processAudioDataRobust = (data, drawLength) => {
+                const latestStart = data.length - drawLength;
+                const searchStart = Math.max(0, latestStart - 2500);
+
+                let max = 0;
+                let smoothed = 0;
+                const alpha = 0.05;
+
+                for (let i = searchStart; i <= latestStart; i++) {
+                    smoothed += alpha * (data[i] - smoothed);
+                    const absVal = Math.abs(smoothed);
+                    if (absVal > max) max = absVal;
+                }
+
+                if (max < 0.005) return latestStart;
+
+                const threshold = max * 0.5;
+                let isArmed = false;
+
+                smoothed = 0;
+
+                for (let i = searchStart; i <= latestStart; i++) {
+                    smoothed += alpha * (data[i] - smoothed);
+
+                    if (!isArmed && smoothed < -threshold) {
+                        isArmed = true;
+                        continue;
+                    }
+
+                    if (isArmed && smoothed > threshold) {
+                        let zero = i;
+                        while (zero > searchStart && data[zero] > 0) {
+                            zero--;
+                        }
+                        return zero;
+                    }
+                }
+
+                return latestStart;
+            };
+
+            self.onmessage = function(e) {
+                if (e.data.type === 'init') {
+                    const canvas = e.data.canvas;
+                    canvasCtx = canvas.getContext('2d');
+                    CANVAS_WIDTH = canvas.width;
+                    CANVAS_HEIGHT = canvas.height;
+                }
+                else if (e.data.type === 'draw') {
+                    if (!canvasCtx) return;
+                    const { dataArray, sampleRate, windowMs } = e.data;
+
+                    let drawLength = Math.floor((windowMs / 1000) * sampleRate);
+                    if (drawLength > dataArray.length) {
+                        drawLength = dataArray.length;
+                    }
+
+                    const startPoint = processAudioDataRobust(dataArray, drawLength);
+
+                    const step = Math.max(1, Math.floor(drawLength / CANVAS_WIDTH));
+                    const sliceWidth = (CANVAS_WIDTH / drawLength) * step;
+
+                    canvasCtx.fillStyle = "white";
+                    canvasCtx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+                    canvasCtx.lineWidth = 3.5;
+                    canvasCtx.strokeStyle = "black";
+                    canvasCtx.beginPath();
+
+                    let x = 0;
+                    for (let i = 0; i < drawLength; i += step) {
+                        const val = dataArray[startPoint + i];
+                        const y = linear(val, -1.0, 1.0, CANVAS_HEIGHT, 0);
+
+                        if (i === 0) canvasCtx.moveTo(x, y);
+                        else canvasCtx.lineTo(x, y);
+
+                        x += sliceWidth;
+                    }
+                    canvasCtx.stroke();
+
+                    self.postMessage('ready');
+                }
+            };
+        `;
+
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+
+        const audioInput = document.getElementById('audioInput');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const canvas = document.getElementById('oscilloscope');
+
+        const offscreenCanvas = canvas.transferControlToOffscreen();
+        worker.postMessage({ type: 'init', canvas: offscreenCanvas }, [offscreenCanvas]);
+
+        const gainKnob = document.getElementById('gainKnob');
+        const gainValue = document.getElementById('gainValue');
+        const windowKnob = document.getElementById('windowKnob');
+        const windowValue = document.getElementById('windowValue');
+
+        let audioContext = null;
+        let analyser = null;
+        let gainNode = null;
+        let objectURL = null;
+        let currentWindowMs = parseFloat(windowKnob.value);
+
+        gainKnob.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            gainValue.textContent = val.toFixed(2);
+            if (gainNode) gainNode.gain.value = val;
+        });
+
+        windowKnob.addEventListener('input', (e) => {
+            currentWindowMs = parseFloat(e.target.value);
+            windowValue.textContent = currentWindowMs + ' ms';
+        });
+
+        const initWebAudio = () => {
+            if (audioContext) return;
+
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            gainNode = new GainNode(audioContext, { gain: parseFloat(gainKnob.value) });
+            analyser = audioContext.createAnalyser();
+
+            analyser.fftSize = 32768;
+
+            const source = audioContext.createMediaElementSource(audioPlayer);
+            source.connect(analyser).connect(gainNode).connect(audioContext.destination);
+
+            const bufferLength = analyser.fftSize;
+            const dataArray = new Float32Array(bufferLength);
+
+            let isWorkerBusy = false;
+
+            worker.onmessage = (e) => {
+                if (e.data === 'ready') {
+                    isWorkerBusy = false;
+                }
+            };
+
+            const updateLoop = () => {
+                requestAnimationFrame(updateLoop);
+
+                if (isWorkerBusy) return;
+
+                isWorkerBusy = true;
+
+                analyser.getFloatTimeDomainData(dataArray);
+
+                worker.postMessage({
+                    type: 'draw',
+                    dataArray: dataArray,
+                    sampleRate: audioContext.sampleRate,
+                    windowMs: currentWindowMs
+                });
+            };
+
+            updateLoop();
+        };
+
+        const addWheelSupport = (knobElement, wheelStep) => {
+            const container = knobElement.closest('.knob-group');
+
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+
+                let currentValue = parseFloat(knobElement.value);
+                const min = parseFloat(knobElement.min);
+                const max = parseFloat(knobElement.max);
+
+                if (e.deltaY < 0) {
+                    currentValue += wheelStep;
+                } else {
+                    currentValue -= wheelStep;
+                }
+
+                if (currentValue < min) currentValue = min;
+                if (currentValue > max) currentValue = max;
+
+                knobElement.value = currentValue;
+
+                knobElement.dispatchEvent(new Event('input'));
+            }, { passive: false });
+        };
+
+        addWheelSupport(gainKnob, 0.1);
+
+        addWheelSupport(windowKnob, 1);
+
+        audioInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            if (objectURL) URL.revokeObjectURL(objectURL);
+
+            objectURL = URL.createObjectURL(file);
+            audioPlayer.src = objectURL;
+        });
+
+        audioPlayer.addEventListener('play', () => {
+            if (!audioContext) initWebAudio();
+            if (audioContext.state === "suspended") audioContext.resume();
+        });
+    </script>
+</body>
+</html>
