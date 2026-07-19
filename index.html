@@ -121,37 +121,58 @@
                 const latestStart = data.length - drawLength;
                 const searchStart = Math.max(0, latestStart - 2500);
 
-                let max = 0;
-                let smoothed = 0;
-                const alpha = 0.05;
+                const len = latestStart - searchStart + 1;
 
-                for (let i = searchStart; i <= latestStart; i++) {
-                    smoothed += alpha * (data[i] - smoothed);
-                    const absVal = Math.abs(smoothed);
-                    if (absVal > max) max = absVal;
+                let smoothBuffer = new Float32Array(len);
+                for (let i = 0; i < len; i++) {
+                  smoothBuffer[i] = data[searchStart + i];
                 }
 
-                if (max < 0.005) return latestStart;
+                const alpha = 0.01;
 
-                const threshold = max * 0.5;
+                let s = smoothBuffer[0];
+                for (let i = 0; i < len; i++) {
+                  s += alpha * (smoothBuffer[i] - s);
+                  smoothBuffer[i] = s;
+                }
+
+                s = smoothBuffer[len - 1];
+                for (let i = len - 1; i >= 0; i--) {
+                  s += alpha * (smoothBuffer[i] - s);
+                  smoothBuffer[i] = s;
+                }
+
+                let max = -Infinity;
+                let min = Infinity;
+
+                for (let i = 0; i < len; i++) {
+                  if (smoothBuffer[i] > max) max = smoothBuffer[i];
+                  if (smoothBuffer[i] < min) min = smoothBuffer[i];
+                }
+
+                if (max - min <= 0.01) return latestStart;
+
+                const amplitude = max - min;
+                const armThreshold = min + amplitude * 0.25;
+                const triggerThreshold = min + amplitude * 0.75;
+                const midPoint = (max + min) / 2;
+
                 let isArmed = false;
 
-                smoothed = 0;
+                for (let i = 0; i <= len; i++) {
+                  let val = smoothBuffer[i];
 
-                for (let i = searchStart; i <= latestStart; i++) {
-                    smoothed += alpha * (data[i] - smoothed);
-
-                    if (!isArmed && smoothed < -threshold) {
+                    if (!isArmed && val < armThreshold) {
                         isArmed = true;
                         continue;
                     }
 
-                    if (isArmed && smoothed > threshold) {
+                    if (isArmed && val > triggerThreshold) {
                         let zero = i;
-                        while (zero > searchStart && data[zero] > 0) {
+                        while (zero > 0 && smoothBuffer[zero] > 0) {
                             zero--;
                         }
-                        return zero;
+                        return zero + searchStart;
                     }
                 }
 
